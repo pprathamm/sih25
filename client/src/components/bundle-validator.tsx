@@ -1,342 +1,248 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { Package, CheckCircle, AlertTriangle, Copy, FileText, Upload } from "lucide-react";
+import { CheckCircle, AlertCircle, Copy, Code, FileText } from "lucide-react";
+import type { ValidationResult } from "@shared/schema";
 
-interface ValidationIssue {
-  severity: "information" | "warning" | "error";
-  code: string;
-  diagnostics: string;
-}
-
-interface ValidationResponse {
-  resourceType: "OperationOutcome";
-  issue: ValidationIssue[];
-}
-
-export function BundleValidator() {
-  const [bundleJson, setBundleJson] = useState("");
-  const [validationResult, setValidationResult] = useState<ValidationResponse | null>(null);
+export default function BundleValidator() {
+  const [bundleContent, setBundleContent] = useState("");
+  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
+  const [isValidating, setIsValidating] = useState(false);
   const { toast } = useToast();
-
-  const validationMutation = useMutation({
-    mutationFn: async (bundle: any) => {
-      const response = await apiRequest("POST", "/fhir/Bundle/$validate", bundle);
-      return response.json();
-    },
-    onSuccess: (data: ValidationResponse) => {
-      setValidationResult(data);
-      const hasErrors = data.issue.some(issue => issue.severity === "error");
-      
-      toast({
-        title: hasErrors ? "Validation Issues Found" : "Bundle Valid",
-        description: hasErrors 
-          ? "The bundle contains validation errors. Please review below."
-          : "FHIR Bundle structure and dual coding format validated successfully.",
-        variant: hasErrors ? "destructive" : "default",
-      });
-    },
-    onError: (error) => {
-      toast({
-        title: "Validation Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-    },
-  });
 
   const loadSampleBundle = () => {
     const sampleBundle = {
-      "resourceType": "Bundle",
-      "id": "example-problem-list",
-      "type": "collection",
-      "timestamp": new Date().toISOString(),
-      "entry": [
+      resourceType: "Bundle",
+      type: "collection",
+      entry: [
         {
-          "resource": {
-            "resourceType": "Condition",
-            "id": "condition-1",
-            "clinicalStatus": {
-              "coding": [{
-                "system": "http://terminology.hl7.org/CodeSystem/condition-clinical",
-                "code": "active"
+          resource: {
+            resourceType: "Condition",
+            id: "condition-1",
+            clinicalStatus: {
+              coding: [{
+                system: "http://terminology.hl7.org/CodeSystem/condition-clinical",
+                code: "active"
               }]
             },
-            "category": [{
-              "coding": [{
-                "system": "http://terminology.hl7.org/CodeSystem/condition-category",
-                "code": "problem-list-item"
-              }]
-            }],
-            "code": {
-              "coding": [
+            code: {
+              coding: [
                 {
-                  "system": "http://namaste.gov.in/CodeSystem",
-                  "code": "AYU-DIG-001",
-                  "display": "Agnimandya (digestive fire deficiency)"
+                  system: "http://namaste.gov.in/CodeSystem",
+                  code: "AYU-DIG-001",
+                  display: "Agnimandya (digestive fire deficiency)"
                 },
                 {
-                  "system": "http://id.who.int/icd/release/11/mms",
-                  "code": "TM2-DA01",
-                  "display": "Disorder of digestive qi transformation"
+                  system: "http://icd.who.int/tm2",
+                  code: "TM2-DA01",
+                  display: "Disorder of digestive qi transformation"
                 }
               ]
             },
-            "subject": {
-              "reference": "Patient/demo-patient",
-              "display": "Demo Patient"
-            },
-            "recordedDate": new Date().toISOString()
+            subject: {
+              reference: "Patient/demo-patient"
+            }
           }
         }
       ]
     };
 
-    setBundleJson(JSON.stringify(sampleBundle, null, 2));
-    setValidationResult(null);
+    setBundleContent(JSON.stringify(sampleBundle, null, 2));
+    toast({
+      title: "Sample bundle loaded",
+      description: "A sample FHIR Bundle with dual coding has been loaded."
+    });
   };
 
-  const clearBundle = () => {
-    setBundleJson("");
-    setValidationResult(null);
-  };
-
-  const handleValidate = () => {
-    if (!bundleJson.trim()) {
+  const validateBundle = async () => {
+    if (!bundleContent.trim()) {
       toast({
-        title: "No Bundle Data",
-        description: "Please enter a FHIR Bundle JSON before validating.",
-        variant: "destructive",
+        title: "Bundle content required",
+        description: "Please paste a FHIR Bundle JSON to validate.",
+        variant: "destructive"
       });
       return;
     }
 
+    let bundle;
     try {
-      const bundle = JSON.parse(bundleJson);
-      validationMutation.mutate(bundle);
+      bundle = JSON.parse(bundleContent);
     } catch (error) {
       toast({
         title: "Invalid JSON",
-        description: "Please check your JSON syntax and try again.",
-        variant: "destructive",
+        description: "The bundle content is not valid JSON.",
+        variant: "destructive"
       });
+      return;
     }
-  };
 
-  const copyToClipboard = (text: string) => {
-    navigator.clipboard.writeText(text);
-    toast({
-      title: "Copied to Clipboard",
-      description: "Content has been copied to your clipboard.",
-    });
-  };
-
-  const getSeverityVariant = (severity: string) => {
-    switch (severity) {
-      case "error":
-        return "destructive";
-      case "warning":
-        return "default";
-      case "information":
-        return "secondary";
-      default:
-        return "default";
-    }
-  };
-
-  const getSeverityIcon = (severity: string) => {
-    switch (severity) {
-      case "error":
-        return <AlertTriangle className="h-4 w-4" />;
-      case "information":
-        return <CheckCircle className="h-4 w-4" />;
-      default:
-        return <AlertTriangle className="h-4 w-4" />;
+    setIsValidating(true);
+    try {
+      const response = await apiRequest('POST', '/api/bundle/validate', bundle);
+      const result = await response.json();
+      setValidationResult(result);
+      
+      toast({
+        title: result.valid ? "Validation successful" : "Validation completed with issues",
+        description: result.valid ? "Bundle is valid FHIR R4" : "Bundle has validation issues",
+        variant: result.valid ? "default" : "destructive"
+      });
+    } catch (error) {
+      console.error('Validation error:', error);
+      toast({
+        title: "Validation failed",
+        description: "Failed to validate bundle. Please check the format and try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsValidating(false);
     }
   };
 
   return (
-    <div className="space-y-6">
-      <div className="text-center space-y-2">
-        <h2 className="text-2xl font-bold" data-testid="heading-bundle-validator">FHIR Bundle Upload/Validate</h2>
-        <p className="text-muted-foreground">
-          Paste a FHIR Bundle to validate its structure and content against FHIR R4 specifications.
-        </p>
-      </div>
-
+    <div className="grid lg:grid-cols-2 gap-6">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <Package className="w-5 h-5" />
-            <span>FHIR Bundle JSON</span>
+          <CardTitle className="flex items-center gap-2">
+            <Code className="h-5 w-5" />
+            FHIR Bundle Validation
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <div>
-            <label htmlFor="bundle-input" className="text-sm font-medium mb-2 block">
-              Bundle Content
-            </label>
-            <Textarea
-              id="bundle-input"
-              value={bundleJson}
-              onChange={(e) => setBundleJson(e.target.value)}
-              placeholder="Paste FHIR Bundle JSON here..."
-              className="font-mono text-sm h-64"
-              data-testid="textarea-bundle-input"
-            />
-          </div>
-
-          <div className="flex flex-wrap gap-2">
+          <Textarea
+            placeholder="Paste your FHIR Bundle JSON here..."
+            value={bundleContent}
+            onChange={(e) => setBundleContent(e.target.value)}
+            className="min-h-64 font-mono text-sm resize-none"
+            data-testid="textarea-bundle"
+          />
+          <div className="flex gap-4">
             <Button
-              variant="outline"
+              onClick={validateBundle}
+              disabled={isValidating}
+              data-testid="button-validate"
+            >
+              <CheckCircle className="h-4 w-4 mr-2" />
+              {isValidating ? "Validating..." : "Validate"}
+            </Button>
+            <Button
               onClick={loadSampleBundle}
-              data-testid="button-load-sample-bundle"
-            >
-              <FileText className="w-4 h-4 mr-2" />
-              Load Sample Bundle
-            </Button>
-            <Button
               variant="outline"
-              onClick={clearBundle}
-              data-testid="button-clear-bundle"
+              data-testid="button-load-sample"
             >
-              Clear
-            </Button>
-            <Button
-              variant="outline"
-              onClick={() => copyToClipboard(bundleJson)}
-              disabled={!bundleJson.trim()}
-              data-testid="button-copy-bundle"
-            >
-              <Copy className="w-4 h-4 mr-2" />
-              Copy
-            </Button>
-            <Button
-              onClick={handleValidate}
-              disabled={validationMutation.isPending || !bundleJson.trim()}
-              data-testid="button-validate-bundle"
-            >
-              {validationMutation.isPending ? (
-                <>
-                  <div className="w-4 h-4 mr-2 animate-spin border-2 border-primary border-t-transparent rounded-full" />
-                  Validating...
-                </>
-              ) : (
-                <>
-                  <Upload className="w-4 h-4 mr-2" />
-                  Validate Bundle
-                </>
-              )}
+              <Copy className="h-4 w-4 mr-2" />
+              Load Sample
             </Button>
           </div>
         </CardContent>
       </Card>
 
-      {/* Validation Results */}
-      {validationResult && (
-        <Card data-testid="validation-results">
-          <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <Package className="w-5 h-5" />
-              <span>Validation Results</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {validationResult.issue.length === 0 || 
-             (validationResult.issue.length === 1 && validationResult.issue[0].severity === "information") ? (
-              <Alert data-testid="validation-success">
-                <CheckCircle className="h-4 w-4" />
-                <AlertDescription>
-                  <strong>Bundle is valid!</strong>
-                  <br />
-                  FHIR Bundle structure and dual coding format validated successfully.
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <div className="space-y-3">
-                <Alert variant="destructive" data-testid="validation-has-issues">
-                  <AlertTriangle className="h-4 w-4" />
-                  <AlertDescription>
-                    Bundle contains validation issues. Please review the details below.
-                  </AlertDescription>
-                </Alert>
-
-                <div className="space-y-2">
-                  <h4 className="font-semibold text-sm">Validation Issues:</h4>
-                  <div className="space-y-2">
-                    {validationResult.issue.map((issue, index) => (
-                      <div
-                        key={index}
-                        className="flex items-start space-x-3 p-3 rounded-lg border"
-                        data-testid={`validation-issue-${index}`}
-                      >
-                        <div className="flex-shrink-0 mt-0.5">
-                          {getSeverityIcon(issue.severity)}
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center space-x-2 mb-1">
-                            <Badge variant={getSeverityVariant(issue.severity)} className="text-xs">
-                              {issue.severity.toUpperCase()}
-                            </Badge>
-                            <code className="text-xs bg-muted px-1 rounded">{issue.code}</code>
-                          </div>
-                          <p className="text-sm text-muted-foreground">{issue.diagnostics}</p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Validation Guide */}
       <Card>
         <CardHeader>
-          <CardTitle>FHIR Bundle Validation Guide</CardTitle>
+          <CardTitle className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            Validation Results
+          </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid md:grid-cols-2 gap-6">
-            <div>
-              <h4 className="font-semibold text-sm mb-3">Bundle Requirements:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li>• <code className="bg-muted px-1 rounded">resourceType</code> must be "Bundle"</li>
-                <li>• <code className="bg-muted px-1 rounded">type</code> should be specified</li>
-                <li>• <code className="bg-muted px-1 rounded">entry</code> array contains resources</li>
-                <li>• Each entry must have a valid <code className="bg-muted px-1 rounded">resource</code></li>
-              </ul>
-            </div>
-            
-            <div>
-              <h4 className="font-semibold text-sm mb-3">Condition Resource:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li>• <code className="bg-muted px-1 rounded">clinicalStatus</code> required</li>
-                <li>• <code className="bg-muted px-1 rounded">category</code> should include problem-list-item</li>
-                <li>• <code className="bg-muted px-1 rounded">code</code> supports dual coding</li>
-                <li>• <code className="bg-muted px-1 rounded">subject</code> reference required</li>
-              </ul>
-            </div>
-          </div>
+        <CardContent>
+          {validationResult ? (
+            <div className="space-y-4">
+              {/* Validation Status */}
+              <div className={`p-4 rounded-lg border ${
+                validationResult.valid 
+                  ? 'bg-chart-2/10 border-chart-2/20' 
+                  : 'bg-destructive/10 border-destructive/20'
+              }`}>
+                <div className="flex items-center space-x-2 mb-2">
+                  {validationResult.valid ? (
+                    <CheckCircle className="h-5 w-5 text-chart-2" />
+                  ) : (
+                    <AlertCircle className="h-5 w-5 text-destructive" />
+                  )}
+                  <span className={`font-medium ${
+                    validationResult.valid ? 'text-chart-2' : 'text-destructive'
+                  }`}>
+                    {validationResult.valid ? 'Valid FHIR Bundle' : 'Invalid FHIR Bundle'}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground">
+                  {validationResult.valid 
+                    ? 'Bundle structure is valid and contains proper dual coding entries'
+                    : 'Bundle has validation issues that need to be addressed'
+                  }
+                </p>
+              </div>
 
-          <div>
-            <h4 className="font-semibold text-sm mb-3">Dual Coding Support:</h4>
-            <div className="bg-muted/50 rounded-lg p-3 text-sm">
-              <p className="mb-2">The validator supports dual coding with:</p>
-              <ul className="space-y-1 text-muted-foreground">
-                <li>• <strong>NAMASTE System:</strong> http://namaste.gov.in/CodeSystem</li>
-                <li>• <strong>ICD-11 TM2 System:</strong> http://id.who.int/icd/release/11/mms</li>
-                <li>• <strong>Biomedicine System:</strong> http://id.who.int/icd/release/11/mms (with different codes)</li>
-              </ul>
+              {/* Errors */}
+              {validationResult.errors && validationResult.errors.length > 0 && (
+                <div>
+                  <h4 className="font-medium text-destructive mb-2">Errors</h4>
+                  <ul className="space-y-1">
+                    {validationResult.errors.map((error, index) => (
+                      <li key={index} className="text-sm text-destructive">
+                        • {error}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Warnings */}
+              {validationResult.warnings && validationResult.warnings.length > 0 && (
+                <div>
+                  <h4 className="font-medium text-yellow-600 mb-2">Warnings</h4>
+                  <ul className="space-y-1">
+                    {validationResult.warnings.map((warning, index) => (
+                      <li key={index} className="text-sm text-yellow-600">
+                        • {warning}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Summary */}
+              {validationResult.summary && (
+                <div>
+                  <h4 className="font-medium mb-3">Bundle Summary</h4>
+                  <div className="grid grid-cols-2 gap-3 text-sm">
+                    <div className="flex justify-between">
+                      <span>Resources:</span>
+                      <Badge variant="outline" data-testid="summary-resources">
+                        {validationResult.summary.resources}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>Conditions:</span>
+                      <Badge variant="outline" data-testid="summary-conditions">
+                        {validationResult.summary.conditions}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>NAMASTE Codes:</span>
+                      <Badge variant="outline" data-testid="summary-namaste">
+                        {validationResult.summary.namasteCodes}
+                      </Badge>
+                    </div>
+                    <div className="flex justify-between">
+                      <span>ICD-11 Codes:</span>
+                      <Badge variant="outline" data-testid="summary-icd11">
+                        {validationResult.summary.icd11Codes}
+                      </Badge>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
-          </div>
+          ) : (
+            <p className="text-center py-8 text-muted-foreground">
+              Click "Validate" to see validation results
+            </p>
+          )}
         </CardContent>
       </Card>
     </div>

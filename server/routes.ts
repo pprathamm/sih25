@@ -1,516 +1,224 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import { z } from "zod";
 import { storage } from "./storage";
-import { setupAuth, isAuthenticated } from "./replitAuth";
-import { 
-  generateConceptMappings, 
-  enhanceTerminologySearch, 
-  answerTerminologyQuestion,
-  validateCSVData 
-} from "./gemini";
-import {
-  createFHIRValueSetExpansion,
-  createFHIRTranslationResult,
-  createFHIRCondition,
-  createFHIRBundle,
-  validateFHIRBundle,
-  FHIRParametersSchema,
-  FHIRBundleSchema
-} from "./fhir";
+import { terminologyService } from "./services/terminology";
+import { z } from "zod";
+import type { SearchRequest, FHIRBundle } from "@shared/schema";
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // FHIR URL normalization middleware - decode %24 to $ for FHIR operations
-  app.use('/fhir', (req, _res, next) => {
-    console.log('FHIR middleware - original URL:', req.url);
-    req.url = req.url.replace(/%24/g, '$');
-    console.log('FHIR middleware - normalized URL:', req.url);
-    next();
-  });
-
-  // Auth middleware
-  await setupAuth(app);
-
-  // Audit logging middleware (disabled for now)
-  const auditLog = async (req: any, operation: string, data?: any) => {
-    // Temporarily disabled for development
-    console.log('Audit log:', operation, data);
-  };
-
-  // Auth routes
-  app.get('/api/auth/user', isAuthenticated, async (req: any, res) => {
+  // Search API
+  app.post("/api/search", async (req, res) => {
     try {
-      const userId = req.user.claims.sub;
-      const user = await storage.getUser(userId);
-      res.json({
-        id: userId,
-        email: req.user.claims.email,
-        firstName: req.user.claims.first_name,
-        lastName: req.user.claims.last_name,
-        ...user
-      });
+      const searchRequest = req.body as SearchRequest;
+      
+      if (!searchRequest.query) {
+        return res.status(400).json({ error: "Query is required" });
+      }
+
+      const results = await terminologyService.searchTerminologies(searchRequest);
+      res.json({ results });
     } catch (error) {
-      console.error("Error fetching user:", error);
-      res.json({
-        id: req.user.claims.sub,
-        email: req.user.claims.email,
-        firstName: req.user.claims.first_name,
-        lastName: req.user.claims.last_name
-      });
+      console.error("Search error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // Terminology Search API
-  app.get('/api/search', async (req, res) => {
+  // Create concept mapping
+  app.post("/api/mappings", async (req, res) => {
     try {
-      const { q: query, include_icd, limit = 10 } = req.query;
+      const { sourceCode, sourceSystem, targetCode, targetSystem, equivalence } = req.body;
       
-      if (!query || typeof query !== 'string') {
-        return res.status(400).json({ message: "Query parameter 'q' is required" });
+      if (!sourceCode || !sourceSystem || !targetCode || !targetSystem || !equivalence) {
+        return res.status(400).json({ error: "All mapping fields are required" });
       }
 
-      await auditLog(req, 'terminology.search', { query, include_icd });
-
-      // Search NAMASTE codes
-      const namasteCodes = await storage.getNamasteCodes(query, parseInt(limit as string));
-      
-      let results = namasteCodes.map(code => ({
-        code: code.code,
-        display: code.display,
-        definition: code.definition,
-        system: code.system,
-        category: code.category,
-        type: 'namaste'
-      }));
-
-      // Include ICD-11 suggestions if requested
-      if (include_icd === 'true') {
-        const icd11Codes = await storage.getIcd11Codes(query, 'TM2', parseInt(limit as string));
-        const icd11Results = icd11Codes.map(code => ({
-          code: code.code,
-          display: code.display,
-          definition: code.definition,
-          system: code.system,
-          category: code.module,
-          type: 'icd11'
-        }));
-        
-        results = [...results, ...icd11Results];
-      }
-
-      // Enhance with AI if available
-      try {
-        results = await enhanceTerminologySearch(query, results);
-      } catch (error) {
-        console.error('AI enhancement failed:', error);
-      }
-
-      res.json({
-        query,
-        total: results.length,
-        results
-      });
-    } catch (error) {
-      console.error('Search error:', error);
-      res.status(500).json({ message: "Search failed" });
-    }
-  });
-
-  // Concept Mapping API
-  app.post('/api/mapping/suggest', async (req, res) => {
-    try {
-      const { code, display, definition, system } = req.body;
-      
-      if (!code || !display) {
-        return res.status(400).json({ message: "Code and display are required" });
-      }
-
-      await auditLog(req, 'mapping.suggest', { code, system });
-
-      // Generate AI mappings
-      const aiMappings = await generateConceptMappings(code, display, definition);
-      
-      // Store mappings for future use
-      for (const mapping of aiMappings) {
-        try {
-          await storage.createConceptMapping({
-            sourceCode: code,
-            sourceSystem: system || "http://namaste.gov.in/CodeSystem",
-            targetCode: mapping.targetCode,
-            targetSystem: "http://id.who.int/icd/release/11/mms",
-            equivalence: "equivalent",
-            confidence: mapping.confidence,
-            mappingType: 'ai-generated',
-            createdBy: 'system'
-          });
-        } catch (error) {
-          // Ignore duplicates
-        }
-      }
-
-      res.json({
-        sourceCode: code,
-        mappings: aiMappings
-      });
-    } catch (error) {
-      console.error('Mapping suggestion error:', error);
-      res.status(500).json({ message: "Mapping suggestion failed" });
-    }
-  });
-
-  // FHIR ValueSet $expand
-  app.get('/fhir/ValueSet/$expand', async (req, res) => {
-    try {
-      const { url } = req.query;
-      
-      if (!url || typeof url !== 'string') {
-        return res.status(400).json({ message: "ValueSet URL is required" });
-      }
-
-      await auditLog(req, 'fhir.valueset.expand', { url });
-
-      // Extract category from URL (e.g., ayurveda, siddha, unani)
-      const category = url.split('/').pop();
-      let codes;
-
-      if (category === 'ayurveda') {
-        codes = await storage.getNamasteCodes('', 100);
-        codes = codes.filter(c => c.category === 'AYU');
-      } else if (category === 'siddha') {
-        codes = await storage.getNamasteCodes('', 100);
-        codes = codes.filter(c => c.category === 'SID');
-      } else if (category === 'unani') {
-        codes = await storage.getNamasteCodes('', 100);
-        codes = codes.filter(c => c.category === 'UNA');
-      } else {
-        codes = await storage.getNamasteCodes('', 100);
-      }
-
-      const concepts = codes.map(code => ({
-        system: code.system,
-        code: code.code,
-        display: code.display
-      }));
-
-      const valueSet = createFHIRValueSetExpansion(url, concepts);
-      res.json(valueSet);
-    } catch (error) {
-      console.error('ValueSet expand error:', error);
-      res.status(500).json({ message: "ValueSet expansion failed" });
-    }
-  });
-
-  // FHIR ConceptMap $translate
-  app.post('/fhir/ConceptMap/$translate', async (req, res) => {
-    try {
-      const parameters = FHIRParametersSchema.parse(req.body);
-      
-      let sourceCode = '';
-      let sourceSystem = '';
-      let targetSystem = '';
-      
-      parameters.parameter?.forEach(param => {
-        if (param.name === 'code') sourceCode = param.valueCode || '';
-        if (param.name === 'system') sourceSystem = param.valueUri || '';
-        if (param.name === 'target') targetSystem = param.valueUri || '';
-      });
-
-      if (!sourceCode || !sourceSystem || !targetSystem) {
-        return res.status(400).json({ message: "Code, system, and target parameters are required" });
-      }
-
-      await auditLog(req, 'fhir.conceptmap.translate', { sourceCode, sourceSystem, targetSystem });
-
-      // Look for existing mappings
-      const mappings = await storage.getConceptMappings(sourceCode, targetSystem);
-      
-      let translationResults = mappings.map(mapping => ({
-        code: mapping.targetCode,
-        system: mapping.targetSystem,
-        display: '', // Would need to fetch from ICD-11 codes
-        equivalence: mapping.equivalence
-      }));
-
-      // If no mappings found, try to generate with AI
-      if (translationResults.length === 0 && sourceSystem.includes('namaste.gov.in')) {
-        const namasteCode = await storage.getNamasteCodeByCode(sourceCode);
-        if (namasteCode) {
-          const aiMappings = await generateConceptMappings(
-            namasteCode.code,
-            namasteCode.display,
-            namasteCode.definition || undefined
-          );
-          
-          translationResults = aiMappings.map(mapping => ({
-            code: mapping.targetCode,
-            system: "http://id.who.int/icd/release/11/mms",
-            display: mapping.targetDisplay,
-            equivalence: "equivalent"
-          }));
-        }
-      }
-
-      const result = createFHIRTranslationResult(
+      const mapping = await terminologyService.createMapping(
         sourceCode,
         sourceSystem,
-        '', // Would need source display
-        translationResults
+        targetCode,
+        targetSystem,
+        equivalence
       );
 
-      res.json(result);
+      res.json(mapping);
     } catch (error) {
-      console.error('ConceptMap translate error:', error);
-      res.status(500).json({ message: "Translation failed" });
+      console.error("Mapping creation error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // CSV Ingestion API
-  app.post('/api/csv/ingest', isAuthenticated, async (req, res) => {
+  // CSV ingestion
+  app.post("/api/ingest-csv", async (req, res) => {
     try {
-      const { csvData } = req.body;
+      const csvData = req.body.data;
       
-      if (!csvData || typeof csvData !== 'string') {
-        return res.status(400).json({ message: "CSV data is required" });
+      if (!Array.isArray(csvData)) {
+        return res.status(400).json({ error: "CSV data must be an array" });
       }
 
-      await auditLog(req, 'csv.ingest.start', { length: csvData.length });
-
-      // Validate CSV with AI
-      const validation = await validateCSVData(csvData);
-      
-      if (!validation.isValid) {
-        return res.status(400).json({
-          message: "CSV validation failed",
-          errors: validation.errors,
-          suggestions: validation.suggestions
-        });
-      }
-
-      // Parse CSV
-      const lines = csvData.trim().split('\n');
-      const headers = lines[0].split(',').map(h => h.trim());
-      
-      if (!headers.includes('code') || !headers.includes('display')) {
-        return res.status(400).json({ message: "CSV must include 'code' and 'display' columns" });
-      }
-
-      const codes = [];
-      for (let i = 1; i < lines.length; i++) {
-        const values = lines[i].split(',').map(v => v.trim());
-        const codeObj: any = {};
-        
-        headers.forEach((header, index) => {
-          if (values[index]) {
-            codeObj[header] = values[index];
-          }
-        });
-
-        if (codeObj.code && codeObj.display) {
-          // Extract category from code (AYU, SID, UNA)
-          const category = codeObj.code.split('-')[0];
-          const subCategory = codeObj.code.split('-')[1];
-          
-          codes.push({
-            code: codeObj.code,
-            display: codeObj.display,
-            definition: codeObj.definition,
-            system: "http://namaste.gov.in/CodeSystem",
-            category,
-            subCategory
-          });
-        }
-      }
-
-      // Bulk insert
-      await storage.bulkInsertNamasteCodes(codes);
-
-      await auditLog(req, 'csv.ingest.complete', { 
-        codesProcessed: codes.length,
-        validation: validation.suggestions 
-      });
-
-      res.json({
-        message: "CSV ingested successfully",
-        codesProcessed: codes.length,
-        validation
-      });
+      const count = await terminologyService.ingestCSV(csvData);
+      res.json({ message: `Successfully ingested ${count} terminology codes` });
     } catch (error) {
-      console.error('CSV ingestion error:', error);
-      res.status(500).json({ message: "CSV ingestion failed" });
+      console.error("CSV ingestion error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // Problem List API
-  app.get('/api/problems', isAuthenticated, async (req, res) => {
+  // Problem list management
+  app.get("/api/problems", async (req, res) => {
     try {
-      const userId = req.user?.claims?.sub;
-      const problems = await storage.getProblemEntries(undefined, userId);
-      
+      const problems = await storage.getAllProblemListEntries();
       res.json(problems);
     } catch (error) {
-      console.error('Get problems error:', error);
-      res.status(500).json({ message: "Failed to fetch problems" });
+      console.error("Error fetching problems:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.post('/api/problems', isAuthenticated, async (req, res) => {
+  app.post("/api/problems", async (req, res) => {
     try {
-      const userId = req.user?.claims?.sub;
-      const { namasteCode, namasteDisplay, icd11Code, icd11Display, patientId } = req.body;
+      const { namasteCode, icd11Code, patientId } = req.body;
       
-      const problem = await storage.createProblemEntry({
-        patientId: patientId || 'demo-patient',
+      const problem = await storage.createProblemListEntry({
         namasteCode,
-        namasteDisplay,
         icd11Code,
-        icd11Display,
-        createdBy: userId
+        patientId: patientId || "demo-patient",
+        status: "active"
       });
-
-      await auditLog(req, 'problem.create', { problemId: problem.id, namasteCode, icd11Code });
 
       res.json(problem);
     } catch (error) {
-      console.error('Create problem error:', error);
-      res.status(500).json({ message: "Failed to create problem" });
+      console.error("Problem creation error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  app.delete('/api/problems/:id', isAuthenticated, async (req, res) => {
+  // FHIR Bundle validation
+  app.post("/api/bundle/validate", async (req, res) => {
+    try {
+      const bundle = req.body as FHIRBundle;
+      
+      if (!bundle || typeof bundle !== "object") {
+        return res.status(400).json({ error: "Invalid bundle format" });
+      }
+
+      const validationResult = await terminologyService.validateFHIRBundle(bundle);
+      res.json(validationResult);
+    } catch (error) {
+      console.error("Bundle validation error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Test FHIR route
+  app.get("/api/fhir/test", async (req, res) => {
+    console.log("FHIR test route hit!");
+    res.json({ message: "FHIR routing is working!", timestamp: new Date().toISOString() });
+  });
+
+  // FHIR ValueSet $expand operation
+  app.get("/api/fhir/ValueSet/:id/expand", async (req, res) => {
     try {
       const { id } = req.params;
-      
-      await storage.deleteProblemEntry(id);
-      await auditLog(req, 'problem.delete', { problemId: id });
+      const { filter, count = 20 } = req.query;
 
-      res.json({ message: "Problem deleted successfully" });
-    } catch (error) {
-      console.error('Delete problem error:', error);
-      res.status(500).json({ message: "Failed to delete problem" });
-    }
-  });
-
-  // Export problems as FHIR Bundle
-  app.get('/api/problems/export/fhir', isAuthenticated, async (req, res) => {
-    try {
-      const userId = req.user?.claims?.sub;
-      const problems = await storage.getProblemEntries(undefined, userId);
-      
-      const conditions = problems.map(problem => 
-        createFHIRCondition(
-          problem.patientId || 'Patient/demo',
-          problem.namasteCode || '',
-          problem.namasteDisplay || '',
-          problem.icd11Code || undefined,
-          problem.icd11Display || undefined
-        )
+      // Mock FHIR ValueSet expansion
+      const searchResults = await storage.searchTerminologyCodes(
+        filter as string || "",
+        id === "namaste-codes" ? ["NAMASTE"] : undefined
       );
 
-      const bundle = createFHIRBundle('collection', conditions);
-      
-      await auditLog(req, 'fhir.bundle.export', { 
-        problemCount: problems.length,
-        bundleId: bundle.id 
-      });
-
-      res.json(bundle);
-    } catch (error) {
-      console.error('Export problems error:', error);
-      res.status(500).json({ message: "Failed to export problems" });
-    }
-  });
-
-  // FHIR Bundle Validation
-  app.post('/fhir/Bundle/$validate', async (req, res) => {
-    try {
-      const bundle = req.body;
-      
-      const validation = validateFHIRBundle(bundle);
-      
-      await auditLog(req, 'fhir.bundle.validate', { 
-        isValid: validation.isValid,
-        errorCount: validation.errors.length 
-      });
-
-      if (validation.isValid) {
-        res.json({
-          resourceType: "OperationOutcome",
-          issue: [{
-            severity: "information",
-            code: "informational",
-            diagnostics: "Bundle is valid"
-          }]
-        });
-      } else {
-        res.status(400).json({
-          resourceType: "OperationOutcome",
-          issue: validation.errors.map(error => ({
-            severity: "error",
-            code: "invalid",
-            diagnostics: error
+      const expansion = {
+        resourceType: "ValueSet",
+        id,
+        expansion: {
+          identifier: `urn:uuid:${Date.now()}`,
+          timestamp: new Date().toISOString(),
+          total: searchResults.length,
+          contains: searchResults.slice(0, parseInt(count as string)).map(code => ({
+            system: code.system === "NAMASTE" ? "http://namaste.gov.in/CodeSystem" : "http://icd.who.int/tm2",
+            code: code.code,
+            display: code.display
           }))
-        });
-      }
+        }
+      };
+
+      res.json(expansion);
     } catch (error) {
-      console.error('Bundle validation error:', error);
-      res.status(500).json({ message: "Bundle validation failed" });
+      console.error("ValueSet expansion error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // AI Chat API
-  app.post('/api/chat', async (req, res) => {
+  // FHIR ConceptMap $translate operation
+  app.post("/api/fhir/ConceptMap/translate", async (req, res) => {
     try {
-      const { message, sessionId } = req.body;
+      const { code, system, target } = req.body;
       
-      if (!message || !sessionId) {
-        return res.status(400).json({ message: "Message and sessionId are required" });
+      if (!code || !system) {
+        return res.status(400).json({ error: "Code and system are required" });
       }
 
-      // Get chat history for context
-      const history = await storage.getChatMessages(sessionId, 10);
+      const mappings = await storage.getMappingsForCode(code, system);
       
-      const response = await answerTerminologyQuestion(message, { history });
-      
-      // Store chat message
-      await storage.createChatMessage({
-        sessionId,
-        userId: req.user?.claims?.sub,
-        message,
-        response: response.answer,
-        context: response
-      });
+      const parameters: any = {
+        resourceType: "Parameters",
+        parameter: [
+          {
+            name: "result",
+            valueBoolean: mappings.length > 0
+          }
+        ]
+      };
 
-      await auditLog(req, 'ai.chat', { sessionId, messageLength: message.length });
+      if (mappings.length > 0) {
+        parameters.parameter.push(...mappings.map((mapping: any) => ({
+          name: "match",
+          part: [
+            {
+              name: "equivalence",
+              valueCode: mapping.equivalence
+            },
+            {
+              name: "concept",
+              valueCoding: {
+                system: mapping.targetSystem === "ICD-11-TM2" ? "http://icd.who.int/tm2" : mapping.targetSystem,
+                code: mapping.targetCode,
+                display: `Mapped from ${mapping.sourceCode}`
+              }
+            }
+          ]
+        })));
+      }
 
-      res.json(response);
+      res.json(parameters);
     } catch (error) {
-      console.error('Chat error:', error);
-      res.status(500).json({ message: "Chat failed" });
+      console.error("ConceptMap translation error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
   });
 
-  // Audit Trail API
-  app.get('/api/audit', isAuthenticated, async (req, res) => {
+  // Statistics
+  app.get("/api/stats", async (req, res) => {
+    try {
+      const stats = await terminologyService.getStats();
+      res.json(stats);
+    } catch (error) {
+      console.error("Stats error:", error);
+      res.status(500).json({ error: "Internal server error" });
+    }
+  });
+
+  // Audit trail
+  app.get("/api/audit", async (req, res) => {
     try {
       const { limit = 50 } = req.query;
-      const userId = req.user?.claims?.sub;
-      
-      const entries = await storage.getAuditEntries(userId, parseInt(limit as string));
-      
-      res.json(entries);
+      const events = await storage.getAuditEvents(parseInt(limit as string));
+      res.json(events);
     } catch (error) {
-      console.error('Audit trail error:', error);
-      res.status(500).json({ message: "Failed to fetch audit trail" });
+      console.error("Audit trail error:", error);
+      res.status(500).json({ error: "Internal server error" });
     }
-  });
-
-  // Health check
-  app.get('/api/health', (req, res) => {
-    res.json({ 
-      status: 'healthy', 
-      timestamp: new Date().toISOString(),
-      service: 'namaste-icd11-fhir'
-    });
   });
 
   const httpServer = createServer(app);

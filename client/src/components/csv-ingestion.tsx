@@ -1,275 +1,218 @@
 import { useState } from "react";
-import { useMutation } from "@tanstack/react-query";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest } from "@/lib/queryClient";
-import { Upload, FileText, CheckCircle, AlertTriangle, Sparkles } from "lucide-react";
+import { Upload, Download, Trash2, FileText } from "lucide-react";
 
-interface ValidationResult {
-  isValid: boolean;
-  errors: string[];
-  suggestions: string[];
-}
-
-interface IngestionResponse {
-  message: string;
-  codesProcessed: number;
-  validation: ValidationResult;
-}
-
-export function CsvIngestion() {
-  const [csvData, setCsvData] = useState("");
-  const [validationResult, setValidationResult] = useState<ValidationResult | null>(null);
-  const [ingestionResult, setIngestionResult] = useState<IngestionResponse | null>(null);
+export default function CSVIngestion() {
+  const [csvContent, setCsvContent] = useState("");
+  const [isLoading, setIsLoading] = useState(false);
+  const [previewData, setPreviewData] = useState<Array<{ code: string; display: string; definition?: string }>>([]);
   const { toast } = useToast();
 
-  const ingestionMutation = useMutation({
-    mutationFn: async (data: { csvData: string }) => {
-      const response = await apiRequest("POST", "/api/csv/ingest", data);
-      return response.json();
-    },
-    onSuccess: (data: IngestionResponse) => {
-      setIngestionResult(data);
-      setValidationResult(data.validation);
-      toast({
-        title: "CSV Ingested Successfully",
-        description: `${data.codesProcessed} codes have been processed and stored.`,
-      });
-    },
-    onError: (error: any) => {
-      toast({
-        title: "CSV Ingestion Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-      
-      // Try to extract validation errors from the error response
-      try {
-        const errorData = JSON.parse(error.message);
-        if (errorData.errors && errorData.suggestions) {
-          setValidationResult({
-            isValid: false,
-            errors: errorData.errors,
-            suggestions: errorData.suggestions
-          });
-        }
-      } catch {
-        // Ignore JSON parsing errors
-      }
-    },
-  });
-
-  const loadSampleCSV = () => {
-    const sampleData = `code,display,definition
-AYU-DIG-001,Agnimandya (digestive fire deficiency),Condition where digestive fire is weakened
-AYU-RES-002,Kasa (cough),Respiratory condition with persistent cough
-AYU-NEU-005,Shirashoola (headache),Neurological condition causing head pain
-SID-RES-015,Irumal (cough - Siddha),Siddha classification for cough disorders
-UNA-RES-021,Nazla (catarrh),Unani term for nasal congestion and discharge
-UNA-DIG-030,So-e-Meda (metabolic disorder),Unani metabolic condition
-AYU-DIG-011,Amla pitta (acid dyspepsia),Ayurvedic acid-related digestive disorder`;
+  const loadSampleData = () => {
+    const sampleCSV = `code,display,definition
+AYU-DIG-001,Agnimandya,Digestive fire deficiency in Ayurveda
+AYU-DIG-002,Ajeerna,Indigestion and dyspepsia
+AYU-RES-001,Kasaroga,Respiratory disorders and cough
+SID-CIR-001,Hrudayaroga,Cardiac disorders in Siddha medicine
+UNA-NEU-001,Falij,Neurological paralysis conditions`;
     
-    setCsvData(sampleData);
-    setValidationResult(null);
-    setIngestionResult(null);
+    setCsvContent(sampleCSV);
+    parseCSV(sampleCSV);
+    
+    toast({
+      title: "Sample data loaded",
+      description: "Sample NAMASTE terminology data has been loaded for preview."
+    });
   };
 
-  const clearCSV = () => {
-    setCsvData("");
-    setValidationResult(null);
-    setIngestionResult(null);
-  };
+  const parseCSV = (content: string) => {
+    try {
+      const lines = content.trim().split('\n');
+      if (lines.length < 2) {
+        setPreviewData([]);
+        return;
+      }
 
-  const handleIngest = () => {
-    if (!csvData.trim()) {
+      const headers = lines[0].split(',').map(h => h.trim());
+      const data = lines.slice(1).map(line => {
+        const values = line.split(',').map(v => v.trim());
+        return {
+          code: values[0] || '',
+          display: values[1] || '',
+          definition: values[2] || undefined
+        };
+      }).filter(row => row.code && row.display);
+
+      setPreviewData(data);
+    } catch (error) {
+      console.error('CSV parsing error:', error);
+      setPreviewData([]);
       toast({
-        title: "No CSV Data",
-        description: "Please enter CSV data before ingesting.",
-        variant: "destructive",
+        title: "CSV parsing error",
+        description: "Please check your CSV format and try again.",
+        variant: "destructive"
+      });
+    }
+  };
+
+  const handleCSVChange = (content: string) => {
+    setCsvContent(content);
+    parseCSV(content);
+  };
+
+  const clearData = () => {
+    setCsvContent("");
+    setPreviewData([]);
+    
+    toast({
+      title: "Data cleared",
+      description: "CSV content has been cleared."
+    });
+  };
+
+  const ingestCSV = async () => {
+    if (previewData.length === 0) {
+      toast({
+        title: "No data to ingest",
+        description: "Please load or paste CSV data first.",
+        variant: "destructive"
       });
       return;
     }
 
-    ingestionMutation.mutate({ csvData });
+    setIsLoading(true);
+    try {
+      const response = await apiRequest('POST', '/api/ingest-csv', {
+        data: previewData
+      });
+      
+      const result = await response.json();
+      
+      toast({
+        title: "CSV ingestion successful",
+        description: result.message
+      });
+      
+      // Clear data after successful ingestion
+      clearData();
+    } catch (error) {
+      console.error('Ingestion error:', error);
+      toast({
+        title: "Ingestion failed",
+        description: "Failed to ingest CSV data. Please try again.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsLoading(false);
+    }
   };
 
   return (
-    <div className="space-y-6">
-      <div className="text-center space-y-2">
-        <h2 className="text-2xl font-bold" data-testid="heading-csv-ingestion">Ingest NAMASTE CSV</h2>
-        <p className="text-muted-foreground">
-          Upload CSV with columns: code, display, definition. This updates the in-memory NAMASTE CodeSystem with AI-assisted validation.
-        </p>
-      </div>
-
+    <div className="max-w-4xl">
       <Card>
         <CardHeader>
-          <CardTitle className="flex items-center space-x-2">
-            <FileText className="w-5 h-5" />
-            <span>CSV Data Input</span>
+          <CardTitle className="flex items-center gap-2">
+            <FileText className="h-5 w-5" />
+            Ingest NAMASTE CSV
           </CardTitle>
         </CardHeader>
-        <CardContent className="space-y-4">
-          <div>
-            <label htmlFor="csv-input" className="text-sm font-medium mb-2 block">
-              CSV Content
-            </label>
-            <Textarea
-              id="csv-input"
-              value={csvData}
-              onChange={(e) => setCsvData(e.target.value)}
-              placeholder="Paste CSV content here..."
-              className="font-mono text-sm h-48"
-              data-testid="textarea-csv-input"
-            />
-          </div>
+        <CardContent className="space-y-6">
+          <p className="text-muted-foreground">
+            Upload CSV files with columns: code, display, definition. This updates the in-memory NAMASTE CodeSystem.
+          </p>
 
-          <div className="flex flex-wrap gap-2">
-            <Button
-              variant="outline"
-              onClick={loadSampleCSV}
-              data-testid="button-load-sample"
-            >
-              <FileText className="w-4 h-4 mr-2" />
-              Load Sample
-            </Button>
-            <Button
-              variant="outline"
-              onClick={clearCSV}
-              data-testid="button-clear-csv"
-            >
-              Clear
-            </Button>
-            <Button
-              onClick={handleIngest}
-              disabled={ingestionMutation.isPending || !csvData.trim()}
-              data-testid="button-ingest-csv"
-            >
-              {ingestionMutation.isPending ? (
-                <>
-                  <div className="w-4 h-4 mr-2 animate-spin border-2 border-primary border-t-transparent rounded-full" />
-                  Processing...
-                </>
-              ) : (
-                <>
-                  <Upload className="w-4 h-4 mr-2" />
-                  Ingest CSV
-                </>
-              )}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      {/* Validation Results */}
-      {validationResult && (
-        <Card data-testid="validation-results">
-          <CardHeader>
-            <CardTitle className="flex items-center space-x-2">
-              <Sparkles className="w-5 h-5 text-primary" />
-              <span>AI Validation Results</span>
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {validationResult.isValid ? (
-              <Alert data-testid="validation-success">
-                <CheckCircle className="h-4 w-4" />
-                <AlertDescription>
-                  CSV data is valid and ready for ingestion.
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <Alert variant="destructive" data-testid="validation-errors">
-                <AlertTriangle className="h-4 w-4" />
-                <AlertDescription>
-                  Validation issues found. Please review the errors below.
-                </AlertDescription>
-              </Alert>
-            )}
-
-            {validationResult.errors.length > 0 && (
-              <div className="space-y-2">
-                <h4 className="font-semibold text-sm text-destructive">Validation Errors:</h4>
-                <ul className="space-y-1">
-                  {validationResult.errors.map((error, index) => (
-                    <li key={index} className="text-sm text-destructive bg-destructive/10 rounded p-2">
-                      • {error}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-
-            {validationResult.suggestions.length > 0 && (
-              <div className="space-y-2">
-                <h4 className="font-semibold text-sm text-primary">AI Suggestions:</h4>
-                <ul className="space-y-1">
-                  {validationResult.suggestions.map((suggestion, index) => (
-                    <li key={index} className="text-sm text-muted-foreground bg-muted/50 rounded p-2">
-                      💡 {suggestion}
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </CardContent>
-        </Card>
-      )}
-
-      {/* Ingestion Success */}
-      {ingestionResult && (
-        <Card data-testid="ingestion-success">
-          <CardContent className="p-6">
-            <Alert>
-              <CheckCircle className="h-4 w-4" />
-              <AlertDescription>
-                <strong>{ingestionResult.message}</strong>
-                <br />
-                {ingestionResult.codesProcessed} codes have been processed and stored.
-                <br />
-                <span className="text-sm text-muted-foreground mt-2 block">
-                  💡 Tip: Try searching the new codes in the Dual Terminology Search tab.
-                </span>
-              </AlertDescription>
-            </Alert>
-          </CardContent>
-        </Card>
-      )}
-
-      {/* CSV Format Guide */}
-      <Card>
-        <CardHeader>
-          <CardTitle>CSV Format Guide</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="space-y-3">
+          <div className="space-y-4">
             <div>
-              <h4 className="font-semibold text-sm mb-2">Required Columns:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li><code className="bg-muted px-1 rounded">code</code> - NAMASTE code (e.g., AYU-DIG-001)</li>
-                <li><code className="bg-muted px-1 rounded">display</code> - Human-readable term</li>
-              </ul>
-            </div>
-            
-            <div>
-              <h4 className="font-semibold text-sm mb-2">Optional Columns:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li><code className="bg-muted px-1 rounded">definition</code> - Detailed description</li>
-              </ul>
+              <label htmlFor="csv-input" className="block text-sm font-medium mb-2">
+                CSV Content
+              </label>
+              <Textarea
+                id="csv-input"
+                placeholder="Paste CSV content here or load sample data..."
+                value={csvContent}
+                onChange={(e) => handleCSVChange(e.target.value)}
+                className="min-h-32 font-mono text-sm"
+                data-testid="textarea-csv"
+              />
             </div>
 
-            <div>
-              <h4 className="font-semibold text-sm mb-2">Code Format:</h4>
-              <ul className="space-y-1 text-sm text-muted-foreground">
-                <li><strong>AYU-XXX-###</strong> - Ayurveda codes</li>
-                <li><strong>SID-XXX-###</strong> - Siddha codes</li>
-                <li><strong>UNA-XXX-###</strong> - Unani codes</li>
-                <li>Where XXX = system (DIG, RES, NEU, etc.) and ### = sequence number</li>
-              </ul>
+            <div className="flex gap-4">
+              <Button
+                onClick={loadSampleData}
+                variant="outline"
+                className="flex-1"
+                data-testid="button-load-sample"
+              >
+                <Download className="h-4 w-4 mr-2" />
+                Load Sample Data
+              </Button>
+              <Button
+                onClick={clearData}
+                variant="outline"
+                className="flex-1"
+                data-testid="button-clear"
+              >
+                <Trash2 className="h-4 w-4 mr-2" />
+                Clear Data
+              </Button>
             </div>
+
+            {/* CSV Preview */}
+            <Card className="bg-background border-border">
+              <CardHeader>
+                <CardTitle className="text-base">CSV Preview</CardTitle>
+              </CardHeader>
+              <CardContent>
+                {previewData.length > 0 ? (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm" data-testid="table-preview">
+                      <thead>
+                        <tr className="border-b border-border">
+                          <th className="text-left py-2">Code</th>
+                          <th className="text-left py-2">Display</th>
+                          <th className="text-left py-2">Definition</th>
+                        </tr>
+                      </thead>
+                      <tbody className="text-muted-foreground">
+                        {previewData.slice(0, 10).map((row, index) => (
+                          <tr key={index} className="border-b border-border/50">
+                            <td className="py-2 font-mono text-xs">{row.code}</td>
+                            <td className="py-2">{row.display}</td>
+                            <td className="py-2">{row.definition || 'N/A'}</td>
+                          </tr>
+                        ))}
+                        {previewData.length > 10 && (
+                          <tr>
+                            <td colSpan={3} className="py-2 text-center text-muted-foreground">
+                              ... and {previewData.length - 10} more rows
+                            </td>
+                          </tr>
+                        )}
+                      </tbody>
+                    </table>
+                    <div className="mt-2 text-sm text-muted-foreground">
+                      Total rows: {previewData.length}
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-center py-4 text-muted-foreground">No data loaded</p>
+                )}
+              </CardContent>
+            </Card>
+
+            <Button
+              onClick={ingestCSV}
+              disabled={isLoading || previewData.length === 0}
+              className="w-full bg-primary text-primary-foreground hover:bg-primary/90"
+              data-testid="button-ingest"
+            >
+              <Upload className="h-4 w-4 mr-2" />
+              {isLoading ? "Ingesting..." : "Ingest CSV"}
+            </Button>
           </div>
         </CardContent>
       </Card>
